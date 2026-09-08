@@ -244,6 +244,9 @@ def read_node_layout(
             fields.append(base_fields[at])
             at += 1
         elif op == "D":
+            # Same bound as `C` — see the note in ``binary.read_node_layout``.
+            if at >= len(base_fields):
+                raise TextError(f"delete past the end of base node {node_type}")
             at += 1
         elif op in ("I", "A"):
             fields.append(_read_field_spec(cursor))

@@ -178,6 +178,14 @@ def read_node_layout(
             fields.append(base_fields[at])
             at += 1
         elif op == b"D":
+            # Bounded exactly as `C` is (M2 of the audit). A delete past the
+            # end drops a field the base node does not have, which means the
+            # script was written against another base than the one in hand —
+            # and the rest of it is then being applied to the wrong fields.
+            # Unbounded, a script of 99 deletes on a two-field POINT was
+            # accepted; four copies on the same node were refused.
+            if at >= len(base_fields):
+                raise BinaryError(f"delete past the end of base node {node_type}")
             at += 1
         elif op in (b"I", b"A"):
             fields.append(_read_field_spec(reader))

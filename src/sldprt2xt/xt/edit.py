@@ -691,6 +691,9 @@ def _repack_chained_lists(nodes: list[Node]) -> list[Node]:
     """
     by_index = {n.index: n for n in nodes}
     fixed: dict[int, Node] = {}
+    #: Blocks a repack leaves with nothing in them. Kept, they would sit
+    #: mid-chain and break the reader's block arithmetic.
+    doomed: set[int] = set()
     for node in nodes:
         if node.name != "LIST":
             continue
@@ -716,24 +719,40 @@ def _repack_chained_lists(nodes: list[Node]) -> list[Node]:
             used = b.values.get("n_entries") or 0
             entries.extend((b.values.get("entries") or [])[:used])
         width = len(chain[0].values.get("entries") or []) or 1
+        # Refilling is not enough: dropping a whole definition can empty a
+        # block outright, and a chain that keeps it states nine entries in a
+        # head of twenty followed by an empty tail — the head is no longer
+        # the last block, which is the very arithmetic F-87 protects. So the
+        # chain is cut to the blocks it needs, the new last one is unlinked,
+        # and what is left over goes. Measured on loim's LIST 223460 with
+        # SolidWorks' bookkeeping removed: [9, 0] of [20, 20], where one
+        # block says the same thing (Q-56).
+        needed = max(1, -(-len(entries) // width))
+        keep, surplus = chain[:needed], chain[needed:]
         at = 0
-        for b in chain:
+        for position, b in enumerate(keep):
             take = entries[at : at + width]
             at += len(take)
             values = dict(b.values)
             values["entries"] = list(take) + [0] * (width - len(take))
             values["n_entries"] = len(take)
+            if position == len(keep) - 1:
+                values["next_block"] = 0
             fixed[b.index] = rebuild(b, values)
+        for b in surplus:
+            doomed.add(b.index)
         values = dict(node.values)
         values["list_length"] = len(entries)
         if entries:
             values["finger_index"] = len(entries)
-            holder = min((len(entries) - 1) // width, len(chain) - 1)
-            values["finger_block"] = chain[holder].index
+            holder = min((len(entries) - 1) // width, len(keep) - 1)
+            values["finger_block"] = keep[holder].index
         fixed[node.index] = rebuild(node, values)
-    if not fixed:
+    if not fixed and not doomed:
         return nodes
-    return [fixed.get(n.index, n) for n in nodes]
+    return [
+        fixed.get(n.index, n) for n in nodes if n.index not in doomed
+    ]
 
 
 def _attribute_lists(nodes: list[Node]) -> set[int]:
@@ -769,6 +788,47 @@ def _attribute_lists(nodes: list[Node]) -> set[int]:
 
 
 
+#: SolidWorks' own bookkeeping, which its export never transmits (F-53).
+#:
+#: A partition carries far more than geometry: permanent identifiers for every
+#: edge and face, body recipes, time stamps, the id of the last feature that
+#: touched a body. They mean something only inside SolidWorks' own model, and
+#: **SolidWorks refuses to read a transmit that carries them** — measured on
+#: `Etriers BG - V02`, 31 definitions written where its own export keeps 7.
+#: Dropping these, and nothing else, makes the same file open, colours intact.
+#:
+#: The four ``*_AUTOMATION_2_2001`` names are included by family, not by
+#: measurement: they appear on other corpus parts, never in a SolidWorks
+#: export, and share the naming of the identifiers proven guilty. Said plainly
+#: because the rest of this set was proven one file at a time.
+#:
+#: ``SDL/TYSA_COLOUR_2`` is deliberately NOT here. It sits in the file that
+#: opens, and it may carry appearance. Untested is not the same as harmless.
+SOLIDWORKS_BOOKKEEPING: frozenset[str] = frozenset({
+    "ATOM_FACE_ID_2001",
+    "ATOM_ID_2001",
+    "BODY_IN_LIGHTWEIGHT_PERM",
+    "BODY_MATCH",
+    "BODY_RECIPE_2001",
+    "BODY_SCALING_FACTOR",
+    "DOWNSTREAM_FACE_ID",
+    "EDGE_PERM_ID_2001",
+    "EDGE_PERM_ID_2_2003",
+    "ENT_TIME_STAMP_2001",
+    "FACE_ID_2001",
+    "FACE_ID_2_2001",
+    "FILLET_MUTUAL_FACE",
+    "LAST_BODY_MODIFYING_FEATURE_ID",
+    "SDL/TYSA_TRANSLUCENCY",
+    "SDL/TYSA_TRANSLUCENCY_2",
+    "SW_INTERNAL_BODY_NAME",
+    "BODY_AUTOMATION_2_2001",
+    "EDGE_AUTOMATION_2_2001",
+    "FACE_AUTOMATION_2_2001",
+    "VERTEX_AUTOMATION_2_2001",
+})
+
+
 @dataclass(frozen=True)
 class Selection:
     """What goes into a part transmit, and what is left in the partition.
@@ -796,7 +856,11 @@ class Selection:
     #: becomes a question with two halves: the geometry, or what hangs off it.
     attributes: bool = True
     #: Drop the attributes of these definitions, by name, healing the chains.
-    without_attributes: frozenset[str] = frozenset()
+    #: Defaults to :data:`SOLIDWORKS_BOOKKEEPING`: what a transmit must not
+    #: carry, measured and confirmed by opening the result in SolidWorks
+    #: (Q-56). Pass ``frozenset()`` for a faithful dump of everything the
+    #: partition holds — which SolidWorks itself will refuse to read.
+    without_attributes: frozenset[str] = SOLIDWORKS_BOOKKEEPING
     #: Drop these attributes by index. What ``without_attributes`` cannot do:
     #: separate one attribute from the two hundred sharing its definition.
     without_attribute_nodes: frozenset[int] = frozenset()
@@ -857,6 +921,16 @@ class Selection:
             cut_out = self.bodies is not None or self.solids_only
             least = 1 if (current is not None or cut_out) else 2
             kept = wrap_in_assembly(kept, layouts, current, least=least)
+            # Sans la marque, SolidWorks ouvre le fichier comme un assemblage
+            # de N composants au lieu d'une pièce à N corps — mesuré contre
+            # ses propres exports, où c'est la seule différence sur la racine
+            # (Q-56.4). La pose échoue en silence sur une pièce sans aucun
+            # attribut à copier : mieux vaut non marqué que mal marqué.
+            racine = next(
+                (n.index for n in kept if n.name == "ASSEMBLY"), None
+            )
+            if racine is not None:
+                kept = mark_as_multi_body(kept, racine)
         # L'édition peut laisser un bloc entamé au milieu d'une chaîne ;
         # le lecteur Parasolid lit les listes par arithmétique de blocs
         # pleins, alors on retasse en dernier geste.
@@ -985,6 +1059,151 @@ def _note_in_list(chains: _Chains, body: Node, head: int) -> None:
     )
     chains.set(last, "next_block", fresh)
     chains.set(listing, "list_length", (chains.value(listing, "list_length") or 0) + 1)
+
+
+#: SolidWorks' mark for "this assembly is one multi-body part" (Q-56.4).
+#:
+#: A multi-body part transmits as an ASSEMBLY with one INSTANCE per body —
+#: SolidWorks' own export does exactly that, and so do we. But its export
+#: hangs one empty attribute on the root, and a file without it opens as an
+#: **assembly of N components** instead of a part with N bodies. Measured:
+#: its `Etriers BG - V02.x_t` and `loim.x_t` open as multi-body parts, ours
+#: opened as assemblies, and the only difference on the root was this.
+#:
+#: Read off two independent files, and identical in both but for
+#: ``identifier`` — which is not a value: it points at the node spelling the
+#: name, so it is a file-local index (67303 on one, 331717 on the other).
+MULTI_BODY_ATTRIBUTE = "MULTI_BODY_ID_2001"
+MULTI_BODY_TYPE_ID = 9000
+MULTI_BODY_ACTIONS = (0, 0, 0, 0, 3, 5, 0, 0)
+MULTI_BODY_FIELDS = (9, 1)
+MULTI_BODY_LEGAL_OWNERS = (1,) + (0,) * 16
+
+
+def mark_as_multi_body(nodes: list[Node], root: int) -> list[Node]:
+    """Hang SolidWorks' multi-body mark on the assembly root.
+
+    Five nodes, because an attribute is never alone (F-50): the string that
+    spells the definition's name, the definition, the attribute itself, and
+    the list — with its one block — that counts the kinds the owner carries.
+    Getting that count wrong does not merely make the file refused; measured,
+    it brings SolidWorks down. So the list is built even though the root
+    starts with none.
+
+    Nothing here is guessed. Every constant is read off two of SolidWorks'
+    own exports, which agree field for field, and the attribute's payload is
+    ``[0, 0]`` in both: it is a flag, not a value.
+    """
+    by_index = {n.index: n for n in nodes}
+    if root not in by_index:
+        return nodes
+    template = next((n for n in nodes if n.name == "ATTRIB_DEF"), None)
+    kind = next((n for n in nodes if n.name == "ATTRIBUTE"), None)
+    listing_model = next((n for n in nodes if n.name == "LIST"), None)
+    block_model = next((n for n in nodes if n.name == "POINTER_LIS_BLOCK"), None)
+    if not (template and kind and listing_model and block_model):
+        # A part with no attribute at all has nothing to model these on, and
+        # inventing node types from nothing is how a file states a shape no
+        # schema describes. It ships unmarked rather than wrongly marked.
+        return nodes
+    spelling = by_index.get(template.values.get("identifier"))
+    if spelling is None:
+        return nodes
+
+    chains = _Chains(nodes)
+    name_index, def_index = chains.free(), chains.free()
+    attribute_index = chains.free()
+    listing_index, block_index = chains.free(), chains.free()
+
+    chains.add(
+        Node(
+            node_type=spelling.node_type,
+            name=spelling.name,
+            index=name_index,
+            values={"string": [ord(c) for c in MULTI_BODY_ATTRIBUTE]},
+        )
+    )
+    values = dict(template.values)
+    values.update(
+        identifier=name_index,
+        type_id=MULTI_BODY_TYPE_ID,
+        actions=list(MULTI_BODY_ACTIONS),
+        fields=list(MULTI_BODY_FIELDS),
+        legal_owners=list(MULTI_BODY_LEGAL_OWNERS),
+        next=0,
+    )
+    chains.add(
+        Node(
+            node_type=template.node_type,
+            name=template.name,
+            index=def_index,
+            values=values,
+        )
+    )
+    # Joined at the tail of the definition chain, where nothing else moves.
+    last = chains.tail(template.index)
+    if last:
+        chains.set(last, "next", def_index)
+
+    node_id = (chains.value(root, "highest_node_id") or 0) + 1
+    chains.set(root, "highest_node_id", node_id)
+    # Chaque nœud est cloné de son modèle avant d'être rempli : un champ que
+    # le schéma attend et qu'on oublierait sortirait ``None``, et le writer
+    # s'arrête dessus — mesuré, la première écriture a fini là.
+    valeurs = dict(kind.values)
+    valeurs.update(
+        node_id=node_id,
+        definition=def_index,
+        owner=root,
+        next=0,
+        previous=0,
+        next_of_type=0,
+        previous_of_type=0,
+        fields=[0, 0],
+    )
+    chains.add(
+        Node(
+            node_type=kind.node_type,
+            name=kind.name,
+            index=attribute_index,
+            values=valeurs,
+        )
+    )
+    chains.set(root, "attributes_features", attribute_index)
+
+    width = len(block_model.values.get("entries") or []) or 1
+    valeurs = dict(block_model.values)
+    valeurs.update(
+        entries=[attribute_index] + [0] * (width - 1),
+        n_entries=1,
+        next_block=0,
+    )
+    chains.add(
+        Node(
+            node_type=block_model.node_type,
+            name=block_model.name,
+            index=block_index,
+            values=valeurs,
+        )
+    )
+    valeurs = dict(listing_model.values)
+    valeurs.update(
+        list_block=block_index,
+        list_length=1,
+        finger_index=1,
+        finger_block=block_index,
+        next=0,
+    )
+    chains.add(
+        Node(
+            node_type=listing_model.node_type,
+            name=listing_model.name,
+            index=listing_index,
+            values=valeurs,
+        )
+    )
+    chains.set(root, "attribute_chains", listing_index)
+    return chains.applied(nodes)
 
 
 def spread_colours_to_faces(

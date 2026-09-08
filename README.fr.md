@@ -75,6 +75,22 @@ Deux cas seulement où fournir quelque chose :
 Tous les corps de la pièce, avec leurs couleurs. La géométrie est **celle du
 fichier, recopiée** — rien n'est reconstruit, rien n'est approché.
 
+
+**Ce qui n'est *pas* transmis, et pourquoi ça compte.** Une partition
+SolidWorks porte bien plus que de la géométrie : identifiants permanents de
+chaque arête et de chaque face, recettes de corps, horodatages, identifiant de
+la dernière fonction ayant modifié le corps. Tout cela n'a de sens que dans son
+propre modèle, son export ne le transmet jamais — et **il refuse de relire un
+transmit qui le porte**. Mesuré sur une pièce de 49 corps : 31 définitions
+d'attributs écrites là où son export en garde 7, et le fichier ne s'ouvrait
+pas. Depuis la 1.2.0 elles restent en arrière, et le résultat s'ouvre en pièce
+multi-corps, couleurs intactes.
+
+> **Si vous êtes en 1.1.0, mettez à jour.** Elle écrit des fichiers que
+> SolidWorks refuse avec *« The data in this file may be invalid »*, et là où
+> une version plus ancienne en ouvre un, c'est en assemblage de N composants
+> plutôt qu'en pièce à N corps — une marque manquait aussi sur la racine.
+
 ## Qui ouvre le `.x_t`
 
 Les logiciels bâtis sur le noyau Parasolid : SolidWorks, NX, Solid Edge,
@@ -85,6 +101,11 @@ lecteur Parasolid libre ; c'est précisément la raison d'être de cet outil.
 Pour la chaîne libre, il faut du STEP, et produire du STEP est un autre
 métier — reconstruire la géométrie dans un noyau, pas la recopier — que cet
 outil ne fait volontairement pas.
+
+Cet autre métier fait l'objet d'un travail à part, pas encore publié. Le jour
+où il le sera, attendez-vous à ce qu'il dise corps par corps ce qu'il a réussi
+— parce qu'une reconstruction n'est pas une transcription, et que des deux,
+une seule se vérifie contre le fichier.
 
 ## Ça marche sur quoi
 

@@ -75,6 +75,21 @@ Only two cases where you provide anything:
 Every body in the part, with its colours. The geometry is **the file's own,
 transcribed** — nothing is rebuilt, nothing is approximated.
 
+
+**What is *not* transmitted, and why it matters.** A SolidWorks partition
+carries far more than geometry: permanent identifiers for every edge and face,
+body recipes, time stamps, the id of the last feature that touched a body.
+Those mean something only inside SolidWorks' own model, and its export never
+transmits them — **it refuses to read a transmit that carries them**. Measured
+on a 49-body part: 31 attribute definitions written where its own export keeps
+7, and the file would not open. Since 1.2.0 they are left behind, and the
+result opens as a multi-body part with its colours intact.
+
+> **If you are on 1.1.0, upgrade.** It writes files SolidWorks declines with
+> *"The data in this file may be invalid"*, and where an older version does
+> open one, it opens as an assembly of N components rather than a part with N
+> bodies — a mark on the assembly root was missing too.
+
 ## What opens the `.x_t`
 
 Software built on the Parasolid kernel: SolidWorks, NX, Solid Edge,
@@ -85,6 +100,10 @@ Parasolid reader; that is precisely why this tool exists. The open-source
 chain needs STEP, and producing STEP is a different job — rebuilding the
 geometry in a kernel rather than transcribing it — which this tool
 deliberately does not do.
+
+That other job is being worked on separately and is not released yet. When it
+is, expect it to say body by body what it managed — because a rebuild is not a
+transcription, and only one of the two can be checked against the file.
 
 ## What it works on
 
