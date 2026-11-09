@@ -1080,6 +1080,25 @@ MULTI_BODY_FIELDS = (9, 1)
 MULTI_BODY_LEGAL_OWNERS = (1,) + (0,) * 16
 
 
+def _fit_legal_owners(values, template_values) -> list:
+    """Match a ``legal_owners`` array to the file's own schema width.
+
+    The constants above describe the newest schema width (17 owner classes).
+    Files saved by older releases declare fewer (the ``35102`` version schema
+    declares 16), and the writer rejects an array that is longer than the
+    field. Pad or truncate with trailing zeros so the array matches the width
+    of the ``ATTRIB_DEF`` node it is copied from.
+    """
+    declared = template_values.get("legal_owners")
+    fitted = list(values)
+    if not isinstance(declared, (list, tuple)) or not declared:
+        return fitted
+    width = len(declared)
+    if len(fitted) >= width:
+        return fitted[:width]
+    return fitted + [0] * (width - len(fitted))
+
+
 def mark_as_multi_body(nodes: list[Node], root: int) -> list[Node]:
     """Hang SolidWorks' multi-body mark on the assembly root.
 
@@ -1129,7 +1148,7 @@ def mark_as_multi_body(nodes: list[Node], root: int) -> list[Node]:
         type_id=MULTI_BODY_TYPE_ID,
         actions=list(MULTI_BODY_ACTIONS),
         fields=list(MULTI_BODY_FIELDS),
-        legal_owners=list(MULTI_BODY_LEGAL_OWNERS),
+        legal_owners=_fit_legal_owners(MULTI_BODY_LEGAL_OWNERS, template.values),
         next=0,
     )
     chains.add(
@@ -1296,7 +1315,7 @@ def spread_colours_to_faces(
         values.update(
             identifier=name_index,
             type_id=COLOUR_TYPE_ID,
-            legal_owners=list(COLOUR_LEGAL_OWNERS),
+            legal_owners=_fit_legal_owners(COLOUR_LEGAL_OWNERS, template.values),
             next=0,
         )
         chains.add(
